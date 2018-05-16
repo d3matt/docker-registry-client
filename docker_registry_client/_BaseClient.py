@@ -1,9 +1,17 @@
 import logging
-from requests import get, put, delete
+from requests import codes, get, head, post, put, delete
 from requests.exceptions import HTTPError
 import json
 from .AuthorizationService import AuthorizationService
+from .digest import docker_digest
 from .manifest import sign as sign_manifest
+
+try:
+    import urllib.parse as urlparse
+    from urllib.parse import urlencode
+except ImportError:
+    from urllib import urlencode
+    import urlparse
 
 # urllib3 throws some ssl warnings with older versions of python
 #   they're probably ok for the registry client to ignore
@@ -139,6 +147,14 @@ class _Manifest(object):
         self._type = type
         self._digest = digest
 
+    @classmethod
+    def from_file(cls, fpath=None, fobj=None):
+        digest = docker_digest(fpath, fobj)
+        if fobj is None:
+            fobj = open(fpath, 'rb')
+        return cls(json.loads(fobj.read().decode()),
+                   'application/json', digest)
+
 
 BASE_CONTENT_TYPE = 'application/vnd.docker.distribution.manifest'
 
@@ -147,6 +163,7 @@ class BaseClientV2(CommonBaseClient):
     LIST_TAGS = '/v2/{name}/tags/list'
     MANIFEST = '/v2/{name}/manifests/{reference}'
     BLOB = '/v2/{name}/blobs/{digest}'
+    BLOB_UPLOAD = '/v2/{name}/blobs/uploads/'
     schema_1_signed = BASE_CONTENT_TYPE + '.v1+prettyjws'
     schema_1 = BASE_CONTENT_TYPE + '.v1+json'
     schema_2 = BASE_CONTENT_TYPE + '.v2+json'
@@ -208,6 +225,31 @@ class BaseClientV2(CommonBaseClient):
             name=name, reference=reference,
         )
 
+    def put_blob(self, name, fpath=None, fobj=None):
+        self.auth.desired_scope = 'repository:%s:*' % name
+        digest = docker_digest(fpath, fobj)
+        try:
+            self._http_call(self.BLOB, head,
+                            name=name, digest=digest)
+            return digest
+        except HTTPError as exc:
+            if exc.response.status_code != codes.not_found:
+                raise
+        if fobj is None:
+            fobj = open(fpath, 'rb')
+        resp = self._http_response(self.BLOB_UPLOAD, post,
+                                   name=name)
+        parts = list(urlparse.urlparse(resp.headers['Location']))
+        query = urlparse.parse_qs(parts[4])
+        query.update({'digest': digest})
+        parts[0] = ''  # scheme
+        parts[1] = ''  # netloc
+        parts[4] = urlencode(query, True)
+        self._http_call(urlparse.urlunparse(parts),
+                        put, bindata=fobj,
+                        name=name, digest=digest,
+                        content_type='application/octet-stream')
+
     def delete_manifest(self, name, digest):
         self.auth.desired_scope = 'repository:%s:*' % name
         return self._http_call(self.MANIFEST, delete,
@@ -227,7 +269,7 @@ class BaseClientV2(CommonBaseClient):
         self._manifest_digests[(name, reference)] = untrusted_digest
 
     def _http_response(self, url, method, data=None, content_type=None,
-                       schema=None, **kwargs):
+                       bindata=None, schema=None, **kwargs):
         """url -> full target url
            method -> method from requests
            data -> request body
@@ -258,6 +300,8 @@ class BaseClientV2(CommonBaseClient):
 
         if data and not content_type:
             data = json.dumps(data)
+        if bindata:
+            data = bindata
 
         path = url.format(**kwargs)
         logger.debug("%s %s", method.__name__.upper(), path)

@@ -192,6 +192,11 @@ class BaseClientV2(CommonBaseClient):
         self.auth.desired_scope = 'registry:catalog:*'
         return self._http_call('/v2/_catalog', get)
 
+    def get_blob(self, name, digest):
+        self.auth.desired_scope = 'repository:%s:*' % name
+        return self._http_response(self.BLOB, get,
+                                   name=name, digest=digest)
+
     def get_repository_tags(self, name):
         self.auth.desired_scope = 'repository:%s:*' % name
         return self._http_call(self.LIST_TAGS, get, name=name)
@@ -200,11 +205,11 @@ class BaseClientV2(CommonBaseClient):
         m = self.get_manifest(name, reference)
         return m._content, m._digest
 
-    def get_manifest(self, name, reference):
+    def get_manifest(self, name, reference, schema=None):
         self.auth.desired_scope = 'repository:%s:*' % name
         response = self._http_response(
             self.MANIFEST, get, name=name, reference=reference,
-            schema=self.schema_1_signed,
+            schema=schema or self.schema_1_signed
         )
         self._cache_manifest_digest(name, reference, response=response)
         return _Manifest(
